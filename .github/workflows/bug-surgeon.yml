@@ -1,0 +1,98 @@
+name: Claude Bug Surgeon
+
+on:
+  issues:
+    types: [labeled, opened, edited]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to analyze'
+        required: true
+        type: number
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  bug-analysis:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      contains(github.event.issue.labels.*.name, 'bug-surgeon')
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set Issue Context
+        id: issue-context
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "ISSUE_NUMBER=${{ github.event.inputs.issue_number }}" >> $GITHUB_ENV
+          else
+            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+            echo "ISSUE_BODY<<EOF" >> $GITHUB_ENV
+            echo "Title: ${{ github.event.issue.title }}" >> $GITHUB_ENV
+            echo "" >> $GITHUB_ENV
+            echo "Description:" >> $GITHUB_ENV
+            echo "${{ github.event.issue.body }}" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          fi
+
+      - name: Run Bug Surgeon Analysis
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+          ISSUE_BODY: ${{ env.ISSUE_BODY }}
+        run: |
+          echo "🤖 Starting Bug Surgeon analysis for issue #$ISSUE_NUMBER..."
+          python debug_orchestrator.py
+
+      - name: Comment on Issue
+        if: success()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: process.env.ISSUE_NUMBER,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🤖 **Bug Surgeon Analysis Complete**\n\nI\'ve completed my analysis of this issue. Check the pull request I created with my findings and recommended solution.\n\n*Powered by Claude Code Bug Surgeon*'
+            });
+
+      - name: Handle Analysis Failure
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: process.env.ISSUE_NUMBER,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🚨 **Bug Surgeon Analysis Failed**\n\nI encountered an error while analyzing this issue. Please check the workflow logs for details.\n\nCommon issues:\n- Missing or invalid `ANTHROPIC_API_KEY` secret\n- Repository access permissions\n- Malformed issue description\n\n*Powered by Claude Code Bug Surgeon*'
+            });
